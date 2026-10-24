@@ -5,6 +5,42 @@ from fastapi.testclient import TestClient
 from shop_api import main
 
 
+@pytest.mark.parametrize("resource", ["item", "cart"])
+def test_store_not_found_is_translated_at_api_boundary(client, resource):
+    from shop_api.errors import ResourceNotFoundError
+
+    message = f"{resource.title()} not found"
+    with pytest.raises(ResourceNotFoundError, match=message):
+        getattr(main.shop, f"get_{resource}")(999)
+    response = client.get(f"/{resource}/999")
+    assert response.status_code == 404
+    assert response.json() == {"detail": message}
+
+
+def test_store_overflow_is_translated_and_addition_rolled_back(client):
+    from shop_api.errors import CartTotalOverflowError
+
+    item = client.post("/item", json={"name": "Large", "price": 1e308}).json()
+    cart_id = client.post("/cart").json()["id"]
+    client.post(f"/cart/{cart_id}/add/{item['id']}")
+    before = client.get(f"/cart/{cart_id}").json()
+    with pytest.raises(CartTotalOverflowError, match="Cart price must be finite"):
+        main.shop.add_item(cart_id, item["id"])
+    response = client.post(f"/cart/{cart_id}/add/{item['id']}")
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Cart price must be finite"}
+    assert client.get(f"/cart/{cart_id}").json() == before
+
+
+def test_unexpected_store_error_is_not_translated_to_client_error(client, monkeypatch):
+    def fail(cart_id):
+        raise RuntimeError("Unexpected storage failure")
+
+    monkeypatch.setattr(main.shop, "get_cart", fail)
+    with pytest.raises(RuntimeError, match="Unexpected storage failure"):
+        client.get("/cart/1")
+
+
 @pytest.fixture
 def client(monkeypatch, isolated_shop):
     monkeypatch.setattr(main, "shop", isolated_shop)

@@ -1,8 +1,9 @@
 from contextlib import contextmanager
 from time import perf_counter
 
-from fastapi import HTTPException
 from prometheus_client import Counter, Histogram
+
+from .errors import CartTotalOverflowError, ResourceNotFoundError
 
 
 class ShopMetrics:
@@ -61,8 +62,11 @@ class ShopMetrics:
         result = "success"
         try:
             yield
-        except HTTPException as error:
-            result = {404: "not_found", 422: "rejected"}.get(error.status_code, "error")
+        except ResourceNotFoundError:
+            result = "not_found"
+            raise
+        except CartTotalOverflowError:
+            result = "rejected"
             raise
         except Exception:
             result = "error"
