@@ -120,3 +120,36 @@ DATABASE_URL=postgresql+psycopg://shop:local-homework@127.0.0.1:15432/shop_tests
 собственные временные схемы: ограничения БД, rollback после upsert, повторное
 подключение и 48 параллельных HTTP-добавлений. На SQLite последняя проверка
 пропускается; workflow `HW4 PostgreSQL` запускает её на PostgreSQL 17.
+
+## ДЗ5: покрытие тестами и CI
+
+[Условие ДЗ5](https://github.com/L1mple/python-backend-2026/blob/main/lecture5/hw/README.md)
+требует минимум 95% покрытия второй домашки и зелёный CI.
+Покрытие строк измеряется для всего пакета `hw2/hw/shop_api`, включая REST,
+WebSocket-чат, модели, хранилище и метрики. Тесты и учебные примеры в расчёт не входят;
+исключений для непокрытого кода приложения нет.
+
+Из корня репозитория на временной SQLite:
+
+```bash
+env -u DATABASE_URL PYTHONPATH=hw2/hw uv run --no-project --python 3.13 --with-requirements hw2/hw/requirements.txt pytest -q hw2/hw --cov=shop_api --cov-fail-under=95 --cov-report=term-missing --cov-report=xml
+```
+
+Для PostgreSQL сначала создайте отдельную `shop_tests`, как описано в ДЗ4:
+
+```bash
+DATABASE_URL=postgresql+psycopg://shop:local-homework@127.0.0.1:15432/shop_tests PYTHONPATH=hw2/hw uv run --no-project --python 3.13 --with-requirements hw2/hw/requirements.txt pytest -q hw2/hw --cov=shop_api --cov-fail-under=95 --cov-report=term-missing --cov-report=xml
+```
+
+Обе команды повторяются для Python 3.14 заменой `--python 3.13` на `--python 3.14`.
+Не указывайте рабочую БД магазина: тесты записывают данные.
+На SQLite два теста блокировок и конкурентных записей пропускаются;
+полная проверка выполняется на PostgreSQL.
+
+Workflow `HW4 PostgreSQL` запускает весь набор `hw2/hw` с PostgreSQL 17
+на Python 3.13 и 3.14 для push в `main`, `hw4`, `hw5` и PR в `main`, `hw2`, `hw3`.
+Покрытие ниже 95% завершает проверку ошибкой. Таблица покрытия с пропущенными
+строками выводится в лог, а `coverage.xml` сохраняется в артефактах запуска
+`hw5-coverage-python-3.13` и `hw5-coverage-python-3.14`.
+Исходный замер на SQLite под Python 3.13: 98,71%, 84 теста прошли,
+два PostgreSQL-теста пропущены; актуальный результат смотрите в CI.
