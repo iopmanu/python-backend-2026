@@ -1,14 +1,27 @@
 from typing import Annotated
 
 from fastapi import FastAPI, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 
 from .chat import Chat
+from .errors import CartTotalOverflowError, ResourceNotFoundError
 from .models import Cart, Item, ItemInput, ItemPatch
 from .store import Shop
 
 app = FastAPI(title="Shop API")
 shop = Shop()
 chat = Chat()
+
+
+@app.exception_handler(ResourceNotFoundError)
+async def resource_not_found(request, error: ResourceNotFoundError):
+    return JSONResponse(status_code=404, content={"detail": str(error)})
+
+
+@app.exception_handler(CartTotalOverflowError)
+async def cart_total_overflow(request, error: CartTotalOverflowError):
+    return JSONResponse(status_code=422, content={"detail": str(error)})
+
 
 Offset = Annotated[int, Query(ge=0)]
 Limit = Annotated[int, Query(gt=0)]
@@ -37,20 +50,9 @@ async def list_carts(
     min_quantity: Quantity = None,
     max_quantity: Quantity = None,
 ):
-    carts = []
-    for cart_id in shop.carts:
-        cart = shop.get_cart(cart_id)
-        quantity = sum(item.quantity for item in cart.items)
-        if min_price is not None and cart.price < min_price:
-            continue
-        if max_price is not None and cart.price > max_price:
-            continue
-        if min_quantity is not None and quantity < min_quantity:
-            continue
-        if max_quantity is not None and quantity > max_quantity:
-            continue
-        carts.append(cart)
-    return carts[offset : offset + limit]
+    return shop.list_carts(
+        offset, limit, min_price, max_price, min_quantity, max_quantity
+    )
 
 
 @app.post("/cart/{cart_id}/add/{item_id}", response_model=Cart)
@@ -78,14 +80,7 @@ async def list_items(
     max_price: Price = None,
     show_deleted: bool = False,
 ):
-    items = [
-        item
-        for item in shop.items.values()
-        if (show_deleted or not item.deleted)
-        and (min_price is None or item.price >= min_price)
-        and (max_price is None or item.price <= max_price)
-    ]
-    return items[offset : offset + limit]
+    return shop.list_items(offset, limit, min_price, max_price, show_deleted)
 
 
 @app.put("/item/{item_id}", response_model=Item)

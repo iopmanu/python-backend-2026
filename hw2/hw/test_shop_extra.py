@@ -1,3 +1,4 @@
+import sys
 from uuid import uuid4
 
 import pytest
@@ -205,3 +206,146 @@ def test_cart_read_rejects_nonfinite_stored_total(client):
     main.shop.carts[cart_id][item["id"]] = 2
     assert client.get(f"/cart/{cart_id}").status_code == 422
     assert client.get("/cart", params={"max_price": 100}).status_code == 422
+
+
+@pytest.mark.parametrize("resource", ["item", "cart"])
+def test_store_not_found_is_translated_at_api_boundary(client, resource):
+    from shop_api.errors import ResourceNotFoundError
+
+    message = f"{resource.title()} not found"
+    with pytest.raises(ResourceNotFoundError, match=message):
+        getattr(main.shop, f"get_{resource}")(999)
+    response = client.get(f"/{resource}/999")
+    assert response.status_code == 404
+    assert response.json() == {"detail": message}
+
+
+def test_store_overflow_is_translated_and_addition_rolled_back(client):
+    from shop_api.errors import CartTotalOverflowError
+
+    item = client.post("/item", json={"name": "Large", "price": 1e308}).json()
+    cart_id = client.post("/cart").json()["id"]
+    client.post(f"/cart/{cart_id}/add/{item['id']}")
+    before = client.get(f"/cart/{cart_id}").json()
+    with pytest.raises(CartTotalOverflowError, match="Cart total is not finite"):
+        main.shop.add_item(cart_id, item["id"])
+    response = client.post(f"/cart/{cart_id}/add/{item['id']}")
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Cart total is not finite"}
+    assert client.get(f"/cart/{cart_id}").json() == before
+
+
+def test_unexpected_store_error_is_not_translated_to_client_error(client, monkeypatch):
+    def fail(cart_id):
+        raise RuntimeError("Unexpected storage failure")
+
+    monkeypatch.setattr(main.shop, "get_cart", fail)
+    with pytest.raises(RuntimeError, match="Unexpected storage failure"):
+        client.get("/cart/1")
+
+
+def test_item_pagination_stops_after_requested_filtered_page(client):
+    for price in (1, 2, 3, 4):
+        client.post("/item", json={"name": str(price), "price": price})
+    visited = []
+
+    class TracedItems(dict):
+        def values(self):
+            for item in super().values():
+                visited.append(item.id)
+                yield item
+
+    main.shop.items = TracedItems(main.shop.items)
+    response = client.get("/item", params={"min_price": 2, "offset": 1, "limit": 1})
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()] == [3]
+    assert visited == [1, 2, 3]
+
+
+@pytest.mark.parametrize("path", ["/item", "/cart"])
+@pytest.mark.parametrize("params", [{"offset": 1, "limit": 1}, {"min_price": 3}])
+def test_pagination_returns_empty_page_after_offset_or_filter(client, path, params):
+    item = client.post("/item", json={"name": "Milk", "price": 2}).json()
+    cart_id = client.post("/cart").json()["id"]
+    client.post(f"/cart/{cart_id}/add/{item['id']}")
+    response = client.get(path, params=params)
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.parametrize("path", ["/item", "/cart"])
+@pytest.mark.parametrize(
+    "offset,limit,expected",
+    [(2**100, 1, []), (0, 2**100, [0, 1]), (1, sys.maxsize, [1])],
+)
+def test_pagination_accepts_large_integers(client, path, offset, limit, expected):
+    ids = [
+        client.post(
+            path, **({"json": {"name": "Milk", "price": 2}} if path == "/item" else {})
+        ).json()["id"]
+        for _ in range(2)
+    ]
+    response = client.get(path, params={"offset": offset, "limit": limit})
+    assert response.status_code == 200
+    assert [entry["id"] for entry in response.json()] == [ids[i] for i in expected]
+
+
+def test_cart_pagination_builds_only_requested_page_and_skips_tail(client, monkeypatch):
+    item = client.post("/item", json={"name": "Milk", "price": 2}).json()
+    cart_ids = [client.post("/cart").json()["id"] for _ in range(4)]
+    for quantity, cart_id in enumerate(cart_ids):
+        for _ in range(quantity):
+            client.post(f"/cart/{cart_id}/add/{item['id']}")
+    visited, built = [], []
+
+    class TracedCarts(dict):
+        def __iter__(self):
+            for cart_id in super().__iter__():
+                visited.append(cart_id)
+                yield cart_id
+
+        def items(self):
+            for cart_id, quantities in super().items():
+                visited.append(cart_id)
+                yield cart_id, quantities
+
+    main.shop.carts = TracedCarts(main.shop.carts)
+    get_cart = main.shop.get_cart
+
+    def record_cart(cart_id):
+        built.append(cart_id)
+        return get_cart(cart_id)
+
+    monkeypatch.setattr(main.shop, "get_cart", record_cart)
+    response = client.get(
+        "/cart", params={"min_price": 2, "min_quantity": 1, "offset": 1, "limit": 1}
+    )
+    assert response.status_code == 200
+    assert [cart["id"] for cart in response.json()] == [cart_ids[2]]
+    assert built == [cart_ids[2]]
+    assert visited == cart_ids[:3]
+
+
+@pytest.mark.parametrize("method", ["put", "patch"])
+def test_item_update_validates_totals_without_building_cart_responses(
+    client, monkeypatch, method
+):
+    item = client.post("/item", json={"name": "Milk", "price": 2}).json()
+    cart_id = client.post("/cart").json()["id"]
+    client.post(f"/cart/{cart_id}/add/{item['id']}")
+
+    built = []
+    get_cart = main.shop.get_cart
+
+    def record_cart(cart_id):
+        built.append(cart_id)
+        return get_cart(cart_id)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(main.shop, "get_cart", record_cart)
+        response = getattr(client, method)(
+            f"/item/{item['id']}", json={"name": "Fresh milk", "price": 3}
+        )
+    assert response.status_code == 200
+    assert built == []
+    assert client.get(f"/cart/{cart_id}").json()["price"] == 3
