@@ -1,7 +1,6 @@
 import os
 from math import isfinite
 
-from fastapi import HTTPException
 from sqlalchemy import case, create_engine, event, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -9,6 +8,7 @@ from sqlalchemy.engine import URL
 from sqlalchemy.orm import Session, sessionmaker
 
 from .database import Base, CartPosition, CartRow, ItemRow
+from .errors import CartTotalOverflowError, ResourceNotFoundError
 from .models import Cart, CartItem, Item, ItemInput, ItemPatch
 
 
@@ -45,7 +45,7 @@ class Shop:
             query = query.with_for_update()
         row = session.scalar(query)
         if row is None or (row.deleted and not include_deleted):
-            raise HTTPException(404, "Item not found")
+            raise ResourceNotFoundError("Item not found")
         return row
 
     def create_item(self, data: ItemInput) -> Item:
@@ -130,7 +130,7 @@ class Shop:
             if not item.deleted:
                 cart.price += item.price * position.quantity
                 if not isfinite(cart.price):
-                    raise HTTPException(422, "Cart price must be finite")
+                    raise CartTotalOverflowError("Cart price must be finite")
         return list(carts.values())
 
     def _validate_item_carts(self, session: Session, item_id: int):
@@ -148,7 +148,7 @@ class Shop:
     def get_cart(self, cart_id: int) -> Cart:
         with self.sessions() as session:
             if session.get(CartRow, cart_id) is None:
-                raise HTTPException(404, "Cart not found")
+                raise ResourceNotFoundError("Cart not found")
             return self._carts(session, [cart_id])[0]
 
     def list_carts(
@@ -193,12 +193,12 @@ class Shop:
     def add_item(self, cart_id: int, item_id: int) -> Cart:
         with self.sessions.begin() as session:
             if session.get(CartRow, cart_id) is None:
-                raise HTTPException(404, "Cart not found")
+                raise ResourceNotFoundError("Cart not found")
             item = session.scalar(
                 select(ItemRow).where(ItemRow.id == item_id).with_for_update(read=True)
             )
             if item is None or item.deleted:
-                raise HTTPException(404, "Item not found")
+                raise ResourceNotFoundError("Item not found")
             session.execute(
                 select(CartRow.id).where(CartRow.id == cart_id).with_for_update()
             )

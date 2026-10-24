@@ -1,9 +1,11 @@
 from typing import Annotated
 
 from fastapi import FastAPI, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from .chat import Chat
+from .errors import CartTotalOverflowError, ResourceNotFoundError
 from .models import Cart, Item, ItemInput, ItemPatch
 from .metrics import metrics
 from .store import Shop
@@ -34,6 +36,17 @@ Instrumentator(excluded_handlers=["/metrics"]).instrument(
 ).expose(app)
 shop = Shop()
 chat = Chat()
+
+
+@app.exception_handler(ResourceNotFoundError)
+async def resource_not_found(request, error: ResourceNotFoundError):
+    return JSONResponse(status_code=404, content={"detail": str(error)})
+
+
+@app.exception_handler(CartTotalOverflowError)
+async def cart_total_overflow(request, error: CartTotalOverflowError):
+    return JSONResponse(status_code=422, content={"detail": str(error)})
+
 
 Offset = Annotated[int, Query(ge=0)]
 Limit = Annotated[int, Query(gt=0)]
